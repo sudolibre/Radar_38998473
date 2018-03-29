@@ -61,13 +61,12 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
             break
         }
 
-        let detectRectangleRequest = VNDetectRectanglesRequest { (request, error) in
-            self.handleRectangleObservations(request, frame: frame, error: error)
-        }
+        let detectRectangleRequest = VNDetectRectanglesRequest(completionHandler: handleRectangleObservations)
         detectRectangleRequest.minimumAspectRatio = 1.45
         detectRectangleRequest.maximumAspectRatio = 1.65
         detectRectangleRequest.maximumObservations = 3
         detectRectangleRequest.minimumConfidence = 0.9
+
         try? imageRequestHandler.perform([detectRectangleRequest])
     }
 
@@ -83,29 +82,51 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 //            }
 //        }
 //    }
-    func handleRectangleObservations(_ request: VNRequest, frame: ARFrame, error: Error?) {
+    func handleRectangleObservations(_ request: VNRequest, error: Error?) {
         guard let observations = request.results?.compactMap({$0 as? VNRectangleObservation}),
             !observations.isEmpty else {
                 return
         }
         observations.forEach {
             processForVisualDebugger($0)
-            let calculatedDepth = calculateDepth(observation: $0, frame: frame)
-            addBox(rect: $0.boundingBox, depth: calculatedDepth)
+            let calculatedDepth = calculateDepth(observation: $0)
+            if calculatedDepth > 0 {
+                print(calculatedDepth.description + " " + (currentDepth?.description ?? ""))
+                addBox(rect: $0.boundingBox, depth: calculatedDepth)
+            }
         }
     }
 
-    func calculateDepth(observation: VNRectangleObservation, frame: ARFrame) -> Float {
-        let intrinsics = frame.camera.intrinsics
-        let focalLengthX = intrinsics.columns.0.x
-        let focalLengthY = intrinsics.columns.1.y
-        let knownHeight: Float = 0.333333 //feet
-        let observationRect = VNImageRectForNormalizedRect(observation.boundingBox, Int(frame.camera.imageResolution.width), Int(frame.camera.imageResolution.height))
-        let imageHeight = Float(observationRect.height)
+    func calculateDepth(observation: VNRectangleObservation) -> Float {
+        let corners = [observation.topLeft, observation.topRight, observation.bottomLeft, observation.bottomRight]
+        var distances: [Float] = []
+        var medianDistance: Float {
+            var distance: Float = distances.reduce(into: 0.0, +=)
+            if distances.count > 1 {
+                distance /= Float(distances.count)
+            }
+            return distance
+        }
 
-        let distance = knownHeight * focalLengthX / imageHeight
-        print(distance.description + " feet")
-        return distance
+        corners.forEach { (point) in
+            let hits = sceneView.hitTest(point, types: .estimatedVerticalPlane)
+            if let hit = hits.first {
+                let scenePoint = SCNVector3(
+                    x: hit.worldTransform.columns.3.x,
+                    y: hit.worldTransform.columns.3.y,
+                    z: hit.worldTransform.columns.3.z
+                )
+                let viewPoint = sceneView.projectPoint(scenePoint)
+                let distance = viewPoint.z
+                distances.append(distance)
+            }
+
+//            if let cornerDistance = sceneView.hitTest(point, types: .estimatedVerticalPlane).first?.distance {
+//                distances.append(cornerDistance)
+//            }
+        }
+
+        return medianDistance
     }
 
     func getMedianDepthInViewSpace(_ sceneSpacePoints: [vector_float3]) -> Float {
@@ -132,8 +153,9 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         var existingLabels: [SCNBox] = []
         var isSpaceAlreadyOccupied: Bool { return !existingLabels.isEmpty }
         (corners + [midPoint]).forEach({ corner in
-            let cornerHits = sceneView.hitTest(corner, options: [SCNHitTestOption.searchMode: 1]).compactMap({$0.node.geometry as? SCNBox})
-            existingLabels.append(contentsOf: cornerHits)
+            let cornerHits = sceneView.hitTest(corner, options: [SCNHitTestOption.searchMode: 1]) //crashes
+            let labelBoxes = cornerHits.compactMap({$0.node.geometry as? SCNBox})
+            existingLabels.append(contentsOf: labelBoxes)
         })
 
         guard !isSpaceAlreadyOccupied else {
@@ -261,16 +283,25 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     }
 
     // MARK: - ARSCNViewDelegate
-    
-/*
-    // Override to create and configure nodes for anchors added to the view's session.
+    var planeCount = 0
+
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
-        let node = SCNNode()
-     
-        return node
+        if let planchor = anchor as? ARPlaneAnchor {
+            if planchor.alignment == .vertical {
+                print("found a vertical plane, boss!")
+
+                let scenePlaneGeometry = ARSCNPlaneGeometry(device: MTLCreateSystemDefaultDevice()!)
+                scenePlaneGeometry?.update(from: planchor.geometry)
+                let planeNode = SCNNode(geometry: scenePlaneGeometry)
+                planeNode.name = "\(planeCount)"
+                planeCount += 1
+                planeNode.geometry?.firstMaterial?.diffuse.contents = UIColor.cyan.withAlphaComponent(0.5)
+
+                return planeNode            }
+        }
+        return nil
     }
-*/
-    
+
     func session(_ session: ARSession, didFailWithError error: Error) {
         // Present an error message to the user
         
